@@ -20,7 +20,7 @@ Legacy plugin instructions
 
 Install directly from our repo:
 ```
-cordova plugin add http://git.ows.vn:10180/annt/ionic-plugin-deploy.git
+cordova plugin add https://github.com/andaica/custom-ionic-deploy.git
 ```
 
 Or see our [docs](https://docs.ionic.io/services/deploy/) for installation steps.
