@@ -26,7 +26,7 @@ var IonicDeploy = {
   		[app_id]
   	);
   },
-  extract: function(app_id, success,failure) {
+  extract: function(app_id, success, failure) {
     cordova.exec(
       success,
       failure,
