@@ -20,20 +20,25 @@ import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.FileReader;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
+import java.net.URI;
 import java.net.URL;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.Iterator;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
@@ -136,7 +141,7 @@ public class IonicDeploy extends CordovaPlugin {
 
       if(!IonicDeploy.NO_DEPLOY_AVAILABLE.equals(uuid)) {
         logMessage("LOAD", "Init Deploy Version");
-        this.redirect(uuid, false);
+        this.redirect(uuid);
       }
     }
     return null;
@@ -191,7 +196,7 @@ public class IonicDeploy extends CordovaPlugin {
       return true;
     } else if (action.equals("redirect")) {
       final String uuid = this.getUUID("");
-      this.redirect(uuid, true);
+      this.redirect(uuid);
       return true;
     } else if (action.equals("info")) {
       this.info(callbackContext);
@@ -551,21 +556,25 @@ public class IonicDeploy extends CordovaPlugin {
 
       while ((zipEntry = zipInputStream.getNextEntry()) != null) {
         File newFile = new File(versionDir + "/" + zipEntry.getName());
-        newFile.getParentFile().mkdirs();
+        // newFile.getParentFile().mkdirs();
+        if (zipEntry.isDirectory()) {
+          newFile.mkdirs();
+        } else {
+          newFile.getParentFile().mkdirs();
 
-        byte[] buffer = new byte[2048];
+          byte[] buffer = new byte[2048];
 
-        FileOutputStream fileOutputStream = new FileOutputStream(newFile);
-        BufferedOutputStream outputBuffer = new BufferedOutputStream(fileOutputStream, buffer.length);
-        int bits;
-        while((bits = zipInputStream.read(buffer, 0, buffer.length)) != -1) {
-          outputBuffer.write(buffer, 0, bits);
+          FileOutputStream fileOutputStream = new FileOutputStream(newFile);
+          BufferedOutputStream outputBuffer = new BufferedOutputStream(fileOutputStream, buffer.length);
+          int bits;
+          while((bits = zipInputStream.read(buffer, 0, buffer.length)) != -1) {
+            outputBuffer.write(buffer, 0, bits);
+          }
+
+          zipInputStream.closeEntry();
+          outputBuffer.flush();
+          outputBuffer.close();
         }
-
-        zipInputStream.closeEntry();
-        outputBuffer.flush();
-        outputBuffer.close();
-
         extracted += 1;
 
         float progress = (extracted / entries) * new Float("100.0f");
@@ -601,22 +610,98 @@ public class IonicDeploy extends CordovaPlugin {
   }
 
 
-  private void redirect(final String uuid, final boolean recreatePlugins) {
+  private void redirect(final String uuid) {
+    // TODO: get rid of recreatePlugins
     String ignore = this.prefs.getString("ionicdeploy_version_ignore", IonicDeploy.NOTHING_TO_IGNORE);
     if (!uuid.equals("") && !this.ignore_deploy && !uuid.equals(ignore)) {
       prefs.edit().putString("uuid", uuid).apply();
       final File versionDir = this.myContext.getDir(uuid, Context.MODE_PRIVATE);
-      final String deploy_url = versionDir.toURI() + "index.html";
 
-      cordova.getActivity().runOnUiThread(new Runnable() {
-        @Override
-        public void run() {
-          logMessage("REDIRECT", "Loading deploy version: " + uuid);
-          prefs.edit().putString("loaded_uuid", uuid).apply();
-          webView.loadUrlIntoView(deploy_url, recreatePlugins);
-        }
-      });
+      try {
+        // Parse new index as a string and update the cordova.js reference
+        File newIndexFile = new File(versionDir, "index.html");
+        final String indexLocation = newIndexFile.toURI().toString();
+        String newIndex = this.updateIndexCordovaReference(getStringFromFile(indexLocation));
+
+        // Create the file and directory, if need be
+        versionDir.mkdirs();
+        newIndexFile.createNewFile();
+
+        // Save the new index.html
+        FileWriter fw = new FileWriter(newIndexFile);
+        fw.write(newIndex);
+        fw.close();
+
+        // Load in the new index.html
+        cordova.getActivity().runOnUiThread(new Runnable() {
+          @Override
+          public void run() {
+            logMessage("REDIRECT", "Loading deploy version: " + uuid);
+            prefs.edit().putString("loaded_uuid", uuid).apply();
+            webView.loadUrlIntoView(indexLocation, false);
+            webView.clearHistory();
+          }
+        });
+      } catch (Exception e) {
+        logMessage("REDIRECT", "Pre-redirect cordova injection exception: " + Log.getStackTraceString(e));
+      }
     }
+  }
+
+  private static String getStringFromFile (String filePath) throws Exception {
+    // Grab the file and init vars
+    URI uri = URI.create(filePath);
+    File file = new File(uri);
+    StringBuilder text = new StringBuilder();
+    BufferedReader br = new BufferedReader(new FileReader(file));
+    String line;
+
+    //Read text from file
+    while ((line = br.readLine()) != null) {
+      text.append(line);
+      text.append('\n');
+    }
+    br.close();
+
+    return text.toString();
+  }
+
+  private static String updateIndexCordovaReference(String indexStr) {
+    // Init the new script
+    String newReference = "<script src=\"file:///android_asset/www/cordova.js\"></script>";
+
+    // Define regular expressions
+    String commentedRegexString = "<!--.*<script src=(\"|')(.*\\/|)cordova\\.js.*(\"|')>.*<\\/script>.*-->";  // Find commented cordova.js
+    String cordovaRegexString = "<script src=(\"|')(.*\\/|)cordova\\.js.*(\"|')>.*<\\/script>";  // Find cordova.js
+    String scriptRegexString = "<script.*>.*</script>";  // Find a script tag
+
+    // Compile the regexes
+    Pattern commentedRegex = Pattern.compile(commentedRegexString);
+    Pattern cordovaRegex = Pattern.compile(cordovaRegexString);
+    Pattern scriptRegex = Pattern.compile(scriptRegexString);
+
+    // First, make sure cordova.js isn't commented out.
+    if (commentedRegex.matcher(indexStr).find()) {
+      // It is, let's uncomment it.
+      indexStr = indexStr.replaceAll(commentedRegexString, newReference);
+    } else {
+      // It's either uncommented or missing
+      // First let's see if it's uncommented
+      if (cordovaRegex.matcher(indexStr).find()) {
+        // We found an extant cordova.js, update it
+        indexStr = indexStr.replaceAll(cordovaRegexString, newReference);
+      } else {
+        // No cordova.js, gotta inject it!
+        // First, find the first script tag we can
+        Matcher scriptMatcher = scriptRegex.matcher(indexStr);
+        if (scriptMatcher.find()) {
+          // Got the script, add cordova.js below it
+          String newScriptTag = String.format("%s\n%s\n", scriptMatcher.group(0), newReference);
+        }
+      }
+    }
+
+    return indexStr;
   }
 
   private class DownloadTask extends AsyncTask<String, Integer, String> {
